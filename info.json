@@ -1,0 +1,7 @@
+{
+  "participants": ["Renan Moraes"],
+  "social": ["https://github.com/mpraes"],
+  "source-code-repo": "https://github.com/mpraes/rinha-2026-python2",
+  "stack": ["python", "faiss", "numpy", "nginx", "uvicorn"],
+  "open_to_work": true
+}
