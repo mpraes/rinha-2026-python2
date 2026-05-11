@@ -1,6 +1,6 @@
 services:
   api1: &api
-    image: docker.io/rmoraes4/rinha-fraud-2026:latest
+    image: docker.io/rmoraes4/rinha-fraud-2026:v20260511-502a87e
     environment:
       - PORT=8000
       - KNN_K=5
