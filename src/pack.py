@@ -113,6 +113,20 @@ def pack():
     
     list_sizes = [len(lst) for lst in lists]
     print(f"Cluster sizes: min={min(list_sizes)}, max={max(list_sizes)}, avg={sum(list_sizes)//len(list_sizes)}")
+
+    # Sort each inverted list by distance to its centroid so runtime truncation
+    # keeps the most representative vectors first.
+    print("Sorting inverted lists by centroid distance...")
+    for c in range(n_centroids):
+        lst = lists[c]
+        if len(lst) <= 1:
+            continue
+        arr = np.array(lst, dtype=np.int32)
+        vecs = vectors_q[arr].astype(np.float32)
+        diff = vecs - centroids[c]
+        dist = np.sum(diff ** 2, axis=1)
+        order = np.argsort(dist)
+        lists[c] = arr[order].tolist()
     
     # Write binary index
     output_file = data_path / "rinha.idx"

@@ -3,6 +3,10 @@ services:
     image: docker.io/rmoraes4/rinha-fraud-2026:latest
     environment:
       - PORT=8000
+      - KNN_K=5
+      - IVF_NPROBE=3
+      - IVF_MAX_CANDIDATES=1200
+      - IVF_MAX_CANDIDATES_PER_LIST=400
     deploy:
       resources:
         limits:
