@@ -1,7 +1,6 @@
 services:
   api1: &api
     image: rmoraes4/rinha-fraud2-2026:latest
-    build: .
     environment:
       - PORT=8000
     deploy:
@@ -12,7 +11,6 @@ services:
 
   api2:
     <<: *api
-    build: false
 
   lb:
     image: nginx:alpine
