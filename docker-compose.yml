@@ -12,7 +12,7 @@ services:
 
   api2:
     <<: *api
-    build: !reset null
+    build: false
 
   lb:
     image: nginx:alpine
