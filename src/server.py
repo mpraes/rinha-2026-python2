@@ -1,6 +1,7 @@
 """ASGI HTTP server for fraud detection API with IVF + int8."""
 
 import struct
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -79,6 +80,10 @@ class FraudDetector:
         self.normalization = load_json(resources_path / "normalization.json")
         self.mcc_risk = load_json(resources_path / "mcc_risk.json")
         self.data = load_index(data_path)
+        self.k = int(os.getenv("KNN_K", "5"))
+        self.nprobe = int(os.getenv("IVF_NPROBE", "3"))
+        self.max_candidates = int(os.getenv("IVF_MAX_CANDIDATES", "1200"))
+        self.max_candidates_per_list = int(os.getenv("IVF_MAX_CANDIDATES_PER_LIST", "400"))
     
     def vectorize(self, payload: dict) -> np.ndarray:
         """Convert payload to 14-dimensional vector."""
@@ -114,8 +119,7 @@ class FraudDetector:
         vec[9] = 1.0 if terminal["is_online"] else 0.0
         vec[10] = 1.0 if terminal["card_present"] else 0.0
         
-        known_merchants = set(customer["known_merchants"])
-        vec[11] = 1.0 if merchant["id"] not in known_merchants else 0.0
+        vec[11] = 1.0 if merchant["id"] not in customer["known_merchants"] else 0.0
         vec[12] = self.mcc_risk.get(merchant["mcc"], 0.5)
         vec[13] = clamp(merchant["avg_amount"] / norm["max_merchant_avg_amount"])
         
@@ -129,25 +133,50 @@ class FraudDetector:
             -128, 127
         ).astype(np.int8)
     
-    def search(self, query: np.ndarray, k: int = 5) -> int:
+    def search(self, query: np.ndarray, k: int | None = None) -> int:
         """Search IVF index, return fraud count among k neighbors."""
         d = self.data
+        if k is None:
+            k = self.k
         
         # Quantize query
         query_q = self.quantize(query).astype(np.float32)
         
-        # Find nearest centroid
+        # Find nearest centroids
         diff = d["centroids"] - query_q
         dists = np.sum(diff ** 2, axis=1)
-        top_centroid = np.argmin(dists)
-        
-        # Get candidates from that centroid
-        candidates = d["lists"][top_centroid]
-        
-        # Limit candidates for speed
-        max_candidates = 100
-        if len(candidates) > max_candidates:
-            candidates = candidates[:max_candidates]
+        nprobe = min(max(1, self.nprobe), d["n_centroids"])
+        top_centroids = np.argpartition(dists, nprobe - 1)[:nprobe]
+
+        # Collect candidates from multiple lists.
+        candidate_parts = []
+        for c in top_centroids:
+            lst = d["lists"][c]
+            if len(lst) > self.max_candidates_per_list:
+                lst = lst[: self.max_candidates_per_list]
+            candidate_parts.append(lst)
+
+        if candidate_parts:
+            candidates = np.concatenate(candidate_parts)
+        else:
+            candidates = np.empty(0, dtype=np.int32)
+
+        # Fallback: if we still have too few candidates, probe additional centroids.
+        if len(candidates) < k:
+            centroid_order = np.argsort(dists)
+            for c in centroid_order[nprobe:]:
+                lst = d["lists"][c]
+                if len(lst) > self.max_candidates_per_list:
+                    lst = lst[: self.max_candidates_per_list]
+                if len(lst) == 0:
+                    continue
+                candidates = np.concatenate((candidates, lst))
+                if len(candidates) >= k:
+                    break
+
+        # Cap candidate pool to bound tail latency.
+        if len(candidates) > self.max_candidates:
+            candidates = candidates[: self.max_candidates]
         
         # Compute distances (int8 arithmetic)
         candidate_vecs = d["vectors_q"][candidates].astype(np.float32)
@@ -157,7 +186,7 @@ class FraudDetector:
         if len(dists) < k:
             return 0
         
-        top_k_local = np.argpartition(dists, k)[:k]
+        top_k_local = np.argpartition(dists, k - 1)[:k]
         top_k_indices = candidates[top_k_local]
         
         # Count frauds
@@ -166,8 +195,8 @@ class FraudDetector:
     def detect(self, payload: dict) -> dict:
         """Detect fraud for a transaction."""
         vec = self.vectorize(payload)
-        fraud_count = self.search(vec, k=5)
-        fraud_score = fraud_count / 5.0
+        fraud_count = self.search(vec)
+        fraud_score = fraud_count / float(self.k)
         approved = fraud_score < 0.6
         return {"approved": approved, "fraud_score": fraud_score}
 
@@ -178,6 +207,14 @@ detector: FraudDetector = None
 # Pre-encoded responses
 RESPONSE_READY = orjson.dumps({"status": "ready"})
 RESPONSE_SAFE = orjson.dumps({"approved": True, "fraud_score": 0.0})
+RESPONSE_BY_FRAUD_COUNT = (
+    orjson.dumps({"approved": True, "fraud_score": 0.0}),
+    orjson.dumps({"approved": True, "fraud_score": 0.2}),
+    orjson.dumps({"approved": True, "fraud_score": 0.4}),
+    orjson.dumps({"approved": False, "fraud_score": 0.6}),
+    orjson.dumps({"approved": False, "fraud_score": 0.8}),
+    orjson.dumps({"approved": False, "fraud_score": 1.0}),
+)
 
 # Initialize detector
 resources_path = Path(__file__).parent.parent / "resources"
@@ -204,16 +241,16 @@ async def app(scope, receive, send):
 async def handle_fraud_score(scope, receive, send):
     """Handle POST /fraud-score request."""
     try:
-        body = b""
+        body = bytearray()
         more_body = True
         while more_body:
             message = await receive()
-            body += message.get("body", b"")
+            body.extend(message.get("body", b""))
             more_body = message.get("more_body", False)
         
         data = orjson.loads(body)
-        result = detector.detect(data)
-        await send_json(send, orjson.dumps(result))
+        fraud_count = detector.search(detector.vectorize(data))
+        await send_json(send, RESPONSE_BY_FRAUD_COUNT[fraud_count])
     except Exception:
         await send_json(send, RESPONSE_SAFE)
 
